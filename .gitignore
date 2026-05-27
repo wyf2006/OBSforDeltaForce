@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# YOLO models (large files)
+*.pt
+runs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Dataset
+dataset/
+
+# Virtual env
+venv/
+env/
+
