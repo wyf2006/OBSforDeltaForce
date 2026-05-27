@@ -97,6 +97,12 @@ class Config:
     # 是否绘制检测框
     DRAW_DETECTIONS = True
 
+    # 鼠标输出映射到主屏（4K主屏 + 1080p OBS 画面需要开启）
+    OUTPUT_SCALE_TO_MAIN = True
+
+    # 单次最大移动比例（按主屏短边比例）
+    MAX_MOVE_RATIO = 0.05
+
     # --- 性能设置 ---
     # 目标帧率
     TARGET_FPS = 60
@@ -162,6 +168,19 @@ class AimAssist:
             print(f"    3. 摄像头ID正确（当前: {self.config.CAMERA_ID}）")
             print(f"  程序将继续运行，但可能检测不到任何目标。")
 
+        # 主屏分辨率与缩放比例（用于鼠标输出与全屏预览）
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            self.main_w = user32.GetSystemMetrics(0)
+            self.main_h = user32.GetSystemMetrics(1)
+        except Exception:
+            self.main_w, self.main_h = 3840, 2160
+
+        self.scale_x = self.main_w / self.frame_width
+        self.scale_y = self.main_h / self.frame_height
+        print(f"[显示] 主屏分辨率: {self.main_w} x {self.main_h} | 缩放: {self.scale_x:.2f} x {self.scale_y:.2f}")
+
         # 2. YOLO检测器
         print("\n[2/3] 初始化YOLO检测器...")
         self.detector = EnemyDetector(
@@ -191,6 +210,12 @@ class AimAssist:
         self.current_target = None
         self.aim_enabled = False       # 瞄准开关状态
         self.prev_key_state = False    # 上一帧的按键状态
+
+        # 预览窗口（只创建一次，避免多窗口/灰屏）
+        self.window_name = "FPS Aim Assist - F8瞄准 F9退出"
+        if self.config.SHOW_PREVIEW:
+            cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+            cv2.setWindowProperty(self.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
         # 设置退出信号处理
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -308,58 +333,23 @@ class AimAssist:
                     if target is not None:
                         self.current_target = target
 
-                        # 计算当前帧与屏幕中心的直接像素偏移（每次独立计算，不累积）
-                        raw_dx = target.center[0] - frame_center[0]
-                        raw_dy = target.center[1] - frame_center[1]
+                        # ★ 绝对定位：直接把系统鼠标跳到目标中心对应的主屏坐标
+                        # 目标在OBS画面中的像素坐标 → 映射到主屏物理坐标
+                        target_x_obs = target.center[0]
+                        target_y_obs = target.center[1]
 
-                        # 应用爆头偏移
+                        # 爆头偏移
                         if target.bbox is not None:
                             _, y1, _, y2 = target.bbox
                             bbox_height = y2 - y1
-                            head_y = y1 + int(bbox_height * self.mouse.config.headshot_offset)
-                            raw_dy = head_y - frame_center[1]
+                            target_y_obs = y1 + int(bbox_height * self.mouse.config.headshot_offset)
 
-                        # 应用灵敏度（直接缩放，不累积）
-                        dx = raw_dx * self.mouse.config.sensitivity
-                        dy = raw_dy * self.mouse.config.sensitivity
+                        # 映射到主屏坐标
+                        target_x_main = int(target_x_obs * self.scale_x)
+                        target_y_main = int(target_y_obs * self.scale_y)
 
-                        # 动态最大移动距离：根据OBS分辨率智能限制，防止鼠标飞出屏幕
-                        # OBS画面和你的4K屏幕比例不同，需要限制单次移动不超过画面宽度的15%
-                        max_single_move = min(self.frame_width, self.frame_height) * 0.08
-
-                        # Y轴反转
-                        if self.mouse.config.invert_y:
-                            dy = -dy
-
-                        # 死区
-                        dist = (dx**2 + dy**2) ** 0.5
-                        if dist >= self.mouse.config.deadzone_radius:
-                            # 限制单次最大值（防止鼠标被推到屏幕角落触发failsafe）
-                            if dist > max_single_move:
-                                scale = max_single_move / dist
-                                dx *= scale
-                                dy *= scale
-
-                            # ★ 4K主屏适配：OBS副屏1080p → 主屏4K的鼠标坐标比例转换
-                            # OBS捕获分辨率(副屏) vs 主显示器物理分辨率(4K)
-                            # pydirectinput的moveRel是基于主屏像素的，如果游戏在主屏全屏运行，
-                            # 鼠标移动量需要按主屏/副屏比例缩放
-                            primary_scale = True  # 设为True启用4K主屏比例修正
-                            if primary_scale:
-                                # 获取主显示器实际分辨率
-                                try:
-                                    import ctypes
-                                    user32 = ctypes.windll.user32
-                                    main_w = user32.GetSystemMetrics(0)  # 主屏宽
-                                    main_h = user32.GetSystemMetrics(1)  # 主屏高
-                                    scale_x = main_w / self.frame_width
-                                    scale_y = main_h / self.frame_height
-                                    dx *= scale_x
-                                    dy *= scale_y
-                                except Exception:
-                                    pass  # 获取失败则保持原值
-
-                            self.mouse.move_mouse(dx, dy)
+                        # 直接设置绝对光标位置
+                        self.mouse.move_mouse_absolute(target_x_main, target_y_main)
                     else:
                         self.current_target = None
                 else:
@@ -421,20 +411,9 @@ class AimAssist:
                     cv2.putText(display_frame, mouse_str, (15, self.frame_height - 20),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, mouse_color, 2)
 
-                    # 全屏预览：拉满整个屏幕（F9退出）
-                    # 获取主显示器分辨率，把OBS画面拉伸铺满
-                    try:
-                        import ctypes
-                        user32 = ctypes.windll.user32
-                        screen_w = user32.GetSystemMetrics(0)
-                        screen_h = user32.GetSystemMetrics(1)
-                    except Exception:
-                        screen_w, screen_h = 1920, 1080
-
-                    display_frame = cv2.resize(display_frame, (screen_w, screen_h))
-                    cv2.namedWindow("FPS Aim Assist - F8瞄准 F9退出", cv2.WND_PROP_FULLSCREEN)
-                    cv2.setWindowProperty("FPS Aim Assist - F8瞄准 F9退出", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-                    cv2.imshow("FPS Aim Assist - F8瞄准 F9退出", display_frame)
+                    # 全屏预览：拉伸到主屏分辨率并显示
+                    display_frame = cv2.resize(display_frame, (self.main_w, self.main_h))
+                    cv2.imshow(self.window_name, display_frame)
 
                 # 6. 处理键盘输入（全部用keyboard库，避免cv2.waitKey冲突）
                 key = cv2.waitKey(1) & 0xFF

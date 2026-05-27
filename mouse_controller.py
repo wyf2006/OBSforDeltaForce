@@ -172,6 +172,21 @@ class MouseController:
 
         return (dx, dy)
 
+    def move_mouse_absolute(self, x: int, y: int):
+        """
+        绝对定位：直接把系统光标跳到指定屏幕坐标
+
+        Args:
+            x: 主屏X坐标
+            y: 主屏Y坐标
+        """
+        self.is_aiming = True
+        self.last_offset = (float(x), float(y))
+
+        import ctypes
+        # SetCursorPos(x, y) - Win32绝对定位
+        ctypes.windll.user32.SetCursorPos(x, y)
+
     def move_mouse(self, dx: float, dy: float,
                    use_win32: bool = True):
         """
